@@ -1,0 +1,22 @@
+galaxy_info:
+  role_name: ripgrep
+  author: Thiago Alves
+  description: Installs and configure RipGrep
+
+  license: MIT
+
+  min_ansible_version: 2.9
+
+  platforms:
+    - name: macOS
+      versions:
+        - 10.14.6 (Mojave)
+    - name: MacOSX
+      versions:
+        - 10.14.6 (Mojave)
+
+  galaxy_tags:
+    - shell
+    - utility
+    - search
+    - grep

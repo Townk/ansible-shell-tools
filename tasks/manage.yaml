@@ -1,0 +1,71 @@
+# MIT License
+# 
+# Copyright (c) 2019 Thiago Alves
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+---
+- name: "Prepare initial facts for {{ tool_item.name }}"
+  set_fact:
+    tool: "{{ tool_defaults | combine(tool_item, recursive=true) }}"    
+    _tool_assetrule_defaults:
+      name: ""
+      assetname: ""
+      ostype: ""
+      osarch: ""
+      osname: ""
+  vars:
+    tool_defaults:
+      name: ""
+      command: ""
+      version_arg: --version
+      version_state: present
+      state: present
+      install:
+        path: ""
+        type: local
+        force: no
+        target_tree: []
+        sources: []
+        actions: []
+      version:
+        current: "0.0.0"
+        latest: ""
+        latest_tag: ""
+        latest_assets: []
+
+- name: "Define {{ tool.name }} installation dir"
+  set_fact:
+    tool: "{{ tool | combine(new_value, recursive=true) }}"
+  vars:
+    new_value:
+      install:
+        path: "{{ lookup('env', 'XDG_LOCAL_ROOT') if lookup('env', 'XDG_LOCAL_ROOT')|bool else '%s/.local' % lookup('env', 'HOME') }}"
+  when: tool.install.path is not defined or not tool.install.path|bool
+
+- name: "Install {{ tool.name }}"
+  include_tasks: "install.yaml"
+  when: tool.state == "present"
+
+- name: "Remove series of files installed for {{ tool.name }}"
+  include_tasks: undo-action.yaml
+  loop: "{{ tool.install.actions }}"
+  loop_control:
+    loop_var: rm_action
+    label: "{{ tool.install.path }}/{{ rm_action.destination }}{{ '' if 'source' not in rm_action else ('/'+rm_action.source|basename) }}"
+  when: tool.state == "absent"

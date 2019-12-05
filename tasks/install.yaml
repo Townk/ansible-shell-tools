@@ -1,0 +1,168 @@
+# MIT License
+# 
+# Copyright (c) 2019 Thiago Alves
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+---
+########################################################################
+# Check if {{ tool }} is installed system-wide (or at least accessible
+# through the PATH variable)
+- name: Initialize controll variables
+  set_fact:
+    _tool_present: null
+    _tool_cmd: null
+    _tool_temp_root: null
+    _tool_version: null
+    _tool_version_line: null
+    _tool_version_lines: []
+    _tool_version_command: null
+
+- name: "Check if {{ tool.name }} is present in the $PATH"
+  block:
+    - name: "Check if {{ tool.name }} is accessible"
+      shell: command -v {{ tool.command }} 2>/dev/null
+      register: _tool_present
+      ignore_errors: yes
+      changed_when: false
+
+    - name: "Cache {{ tool.name }} command path"
+      set_fact:
+        _tool_cmd: "{{ _tool_present.stdout }}"
+      when: _tool_present.rc == 0
+
+    - name: Normalize check result
+      set_fact:
+        _tool_present: "{{ _tool_present.rc == 0 }}"
+
+########################################################################
+# Check if {{ tool }} was installed but not added to PATH
+- name: "Was {{ tool.name }} previously installed on user's dir but not included on $PATH"
+  block:
+    - name: "Check if {{ tool.name }} is installed on the user-space"
+      stat:
+        path: "{{ tool.install.path }}/bin/{{ tool.command }}"
+      register: _tool_local_present
+
+    - name: "Cache {{ tool.name }} command path"
+      set_fact:
+        _tool_cmd: "{{ tool.install.path }}/bin/{{ tool.command }}"
+      when: _tool_local_present.stat.exists
+
+    - name: Normalize check result
+      set_fact:
+        _tool_present: "{{ _tool_local_present.stat.exists }}"
+  when: not _tool_present
+
+
+- name: "Install {{ tool.name }}"
+  block:
+    ########################################################################
+    # Get installed version
+    - name: "Get installed {{ tool.name }} info"
+      block:
+        - name: "Get installed version of {{ tool.name }}"
+          command: "{{ _tool_cmd }} {{ tool.version_arg }}"
+          register: _tool_version_command
+          ignore_errors: yes
+
+        - name: Split version into lines
+          set_fact:
+            _tool_version_lines: "{{ _tool_version_command.stdout.split('\n') }}"
+          when: _tool_version_command.rc == 0
+
+        - name: Get line relevant to version
+          set_fact:
+            _tool_version_line: "{{ _tool_version_line if (tool.command not in item and tool.name not in item and tool.name|lower not in item) else item }}"
+          loop: "{{ _tool_version_lines }}"
+          when: _tool_version_lines|length > 1
+
+        - name: Fallback to first line
+          set_fact:
+            _tool_version_line: "{{ _tool_version_lines[0] }}"
+          when: _tool_version_lines|length == 1 or _tool_version_line|default(None) is none
+
+        - name: Split version into version elements
+          set_fact:
+            _tool_version: "{{ (item if item[0] != 'v' else item[1:])
+                                if (item is match('v?\\d+.\\d+(.\\d+)?'))
+                                else _tool_version }}"
+          loop: "{{ _tool_version_line.replace('-', ' ').split()|default([]) }}"
+          when: _tool_version_line|default(None) is not none
+
+        - name: Fallback to dummy version when no version is retrieved
+          set_fact:
+            _tool_version: "0.0.0"
+          when: _tool_version|default(None) is none
+
+        - name: "Normalize installed version of {{ tool.name }}"
+          set_fact:
+            tool: "{{ tool | combine(new_value, recursive=true) }}"
+          vars:
+            new_value:
+              version:
+                current: "{{ _tool_version if _tool_version[0] != 'v' else _tool_version[1:] }}"
+      when: _tool_present and _tool_cmd|default(None) is not none and tool.version_state != "absent"
+
+    ########################################################################
+    # Create directory structure for the instalation (including temp dir)
+    - name: "Create {{ tool.name }} installation tree if needed or forced"
+      block:
+        - name: "Create temp location for {{ tool.name }} install files"
+          tempfile:
+            state: directory
+            prefix: "ansible/{{ tool.name }}-install-"
+          register: _tool_temp_root
+
+        - name: "Create {{ tool.name }} installation tree"
+          file:
+            path: "{{ tool.install.path }}/{{ item }}"
+            state: directory
+          loop: "{{ tool.install.target_tree }}"
+      when: tool.install.force or not _tool_present or _tool_latest is version(_tool_version, ">")
+
+    ########################################################################
+    # Retrieve source files
+    - name: "Retrieve {{ tool.name }} files to local folder"
+      include_tasks: get-remote-files.yaml
+      loop: "{{ tool.install.sources }}"
+      loop_control:
+        loop_var: source_item
+        label: "{{ source_item.name }}[{{ source_item.type }}{{ '' if source_item.retrieveby is undefined else '/'+source_item.retrieveby }}]"
+      when: tool.install.force or not _tool_present or _tool_latest is version(_tool_version, ">")
+
+    ########################################################################
+    # Install tool files
+    - name: "Install {{ tool.name }} files to {{ tool.install.path }}"
+      include_tasks: install-action.yaml
+      loop: "{{ tool.install.actions }}"
+      loop_control:
+        loop_var: action_item
+        label: "{{ tool.install.path }}/{{ action_item.destination }}"
+      when: tool.install.force or not _tool_present or _tool_latest is version(_tool_version, ">")
+
+    # - fail:
+
+    ########################################################################
+    # Finish installation
+    - name: Clean up temp files
+      file:
+        path: "{{ _tool_temp_root.path }}"
+        state: absent
+      when: _tool_temp_root.path|default(None) is not none
+  when: tool.install.force or not _tool_present

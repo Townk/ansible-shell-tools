@@ -1,0 +1,230 @@
+# MIT License
+# 
+# Copyright (c) 2019 Thiago Alves
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+---
+- name: Normalize source info
+  set_fact:
+    source: "{{ _source_defaults | combine(source_item, recursive=true) }}"
+  vars:
+    _source_defaults:
+      name: ""
+      type: ""
+      retrieveby: ""
+      extra_options: []
+      matching_rules: []
+
+- name: Define default variables
+  set_fact:
+    _matching_rules_defaults:
+      name: ""
+      osarch: ""
+      osname: ""
+      ostype: ""
+    _tool_latest_info_call: null
+    _tool_prerelease_info_call: null
+    _tool_latest_info: null
+    _tool_all_tags: null
+    _tool_asset_rules: []
+
+- name: Handle GitHub resources
+  block:
+    ########################################################################
+    # Get release information from GitHub
+    - name: "Get {{ tool.name }} latest releases information from GitHub if is not available"
+      block:
+        ########################################################################
+        # Try to get the latest release
+        - name: "Get {{ tool.name }} latest releases information from GitHub"
+          uri:
+            url: "https://api.github.com/repos/{{ source.name }}/releases/latest"
+            headers:
+              Accept: application/vnd.github.v3+json
+              User-Agent: Ansible-provision-playbook
+              Authorization: "token {{ github_auth_token }}"
+            return_content: yes
+          register: _tool_latest_info_call
+          ignore_errors: yes
+
+        - name: "Store {{ tool.name }} release info"        
+          set_fact:
+            _tool_latest_info: "{{ _tool_latest_info_call.json }}"
+          when: >-
+            _tool_latest_info_call is not none and
+              _tool_latest_info_call.status >= 200 and
+              _tool_latest_info_call.status < 300
+
+        ########################################################################
+        # Try to get all releases to select the last one (probably a pre-release)
+        - name: Get pre-release info
+          block:
+            - name: "Get {{ tool.name }} pre-releases version information from GitHub"
+              uri:
+                url: "https://api.github.com/repos/{{ source.name }}/releases"
+                headers:
+                  Accept: application/vnd.github.v3+json
+                  User-Agent: Ansible-provision-playbook
+                  Authorization: "token {{ github_auth_token }}"
+                return_content: yes
+              register: _tool_prerelease_info_call
+              ignore_errors: yes
+
+            - name: "Store {{ tool.name }} pre-release info"        
+              set_fact:
+                _tool_latest_info: "{{ _tool_prerelease_info_call.json[0] }}"
+              when: >-
+                _tool_prerelease_info_call is not none and
+                  _tool_prerelease_info_call.status >= 200 and
+                  _tool_prerelease_info_call.status < 300 and
+                  _tool_prerelease_info_call.json is defined and
+                  _tool_prerelease_info_call.json|length > 0
+          when: >
+            _tool_latest_info_call is none or
+              _tool_latest_info_call.status < 200 or
+              _tool_latest_info_call.status >= 300
+
+        - name: "Get {{ tool.name }} any release version information"
+          set_fact:
+            tool: "{{ tool | combine(new_value, recursive=true) }}"
+          vars:
+            new_value:
+              version:
+                latest: "{{ '' if _tool_latest_info.tag_name|default(None) is none else (_tool_latest_info.tag_name[1:] if _tool_latest_info.tag_name[0] == 'v' else _tool_latest_info.tag_name) }}"
+                latest_tag: "{{ '' if _tool_latest_info.tag_name|default(None) is none else _tool_latest_info.tag_name }}"
+                latest_assets: "{{ '' if _tool_latest_info.assets|default(None) is none else (_tool_latest_info.assets | map(attribute='browser_download_url') | list) }}"
+          when: _tool_latest_info is not none
+
+        ########################################################################
+        # Infer version from tags
+        - name: "Fallback to get GitHub information on {{ source.name }} from tags"
+          block:
+            - name: "Get {{ source.name }} latest release tags from GitHub"
+              uri:
+                url: "https://api.github.com/repos/{{ source.name }}/tags"
+                headers:
+                  Accept: application/vnd.github.v3+json
+                  User-Agent: Ansible-provision-playbook
+                  Authorization: "token {{ github_auth_token }}"
+                return_content: yes
+              register: _tool_all_tags
+
+            - name: "Get tag and version from {{ source.name }} GitHub info"
+              set_fact:
+                tool: "{{ tool | combine(new_value, recursive=true) }}"
+              vars:
+                new_value:
+                  version:
+                    latest_tag: "{{ _tool_all_tags.json[0].name }}"
+                    latest: "{{ _tool_all_tags.json[0].name[1:] if _tool_all_tags.json[0].name[0] == 'v' else _tool_all_tags.json[0].name }}"
+              when: >
+                _tool_all_tags is not none and
+                  _tool_all_tags.status >= 200 and
+                  _tool_all_tags.status < 300
+
+            - name: "Fallback to set version to HEAD on {{ source.name }}"
+              set_fact:
+                tool: "{{ tool | combine(new_value, recursive=true) }}"
+              vars:
+                new_value:
+                  version:
+                    latest_tag: "HEAD"
+                    latest: "0.0.0"
+              when: >
+                not _tool_all_tags|length or
+                _tool_all_tags.status < 200 or
+                _tool_all_tags.status >= 300
+          when: _tool_latest_info is none
+      when: not tool.version.latest_tag|length or not tool.version.latest_assets|length
+
+    ########################################################################
+    # Clone source
+    - name: "Cloning GitHub repo {{ source.name }} to temp folder"
+      git:
+        repo: "https://github.com/{{ source.name }}.git"
+        dest: "{{ _tool_temp_root.path }}"
+        version: "{{ tool.version.latest_tag if tool.version.latest_tag|length else 'HEAD' }}"
+        accept_hostkey: yes
+      when: source.retrieveby == 'clone'
+
+    - name: "Unarchive GitHub asset from repo {{ source.name }}"
+      block:
+        ########################################################################
+        # Get asset name from GitHub
+        - name: "Store the fallback asset (if any)"
+          set_fact:
+            _tool_asset_fallback: "{{ source.matching_rules| rejectattr('osarch', 'defined') | rejectattr('osname', 'defined') | rejectattr('ostype', 'defined') | map(attribute='name') | list | first | regex_replace('\\{version\\}', tool.version.latest) | regex_replace('\\{arch\\}', ansible_architecture) }}"
+
+        - name: "Prepare asset rules for filtering"
+          set_fact:
+            _tool_asset_rules: "{{ _tool_asset_rules|default([]) + [ _matching_rules_defaults | combine(item, recursive=true) ] }}"
+          loop: "{{ source.matching_rules|rejectattr('name', 'equalto', _tool_asset_fallback)|list }}"
+
+        - name: "Filter asset rules for current system architecture"
+          set_fact:
+            _tool_asset_rules: "{{ _tool_asset_rules|selectattr('osarch', 'in', ('', ansible_architecture))|list }}"
+          when: _tool_asset_rules|length > 0
+
+        - name: "Filter asset rules for current system OS name"
+          set_fact:
+            _tool_asset_rules: "{{ _tool_asset_rules|selectattr('osname', 'in', ('', ansible_distribution))|list }}"
+          when: _tool_asset_rules|length > 0
+
+        - name: "Filter asset rules for current system OS type"
+          set_fact:
+            _tool_asset_rules: "{{ _tool_asset_rules|selectattr('ostype', 'in', ('', ansible_os_family))|list }}"
+          when: _tool_asset_rules|length > 0
+
+        - name: "Get target asset"
+          set_fact:
+            _tool_asset_target: "{{ _tool_asset_rules | map(attribute='name') | list | first | regex_replace('\\{version\\}', tool.version.latest) | regex_replace('\\{arch\\}', ansible_architecture) }}"
+          when: _tool_asset_rules|length > 0
+
+        - name: "Use fallback asset"
+          set_fact:
+            _tool_asset_target: "{{ _tool_asset_fallback }}"
+          when: _tool_asset_rules|length == 0
+
+        - name: "Get {{ tool.name }} release asset"
+          set_fact:
+            _tool_asset: "{{ tool.version.latest_assets | select('search', _tool_asset_target) | first }}"
+
+        ########################################################################
+        # Retrieve the assets
+        - name: "Retrieve remote asset from {{ _tool_asset }}"
+          unarchive:
+            src: "{{ _tool_asset }}"
+            dest: "{{ _tool_temp_root.path }}"
+            extra_opts: "{{ source.extra_options }}"
+            remote_src: yes
+          when: _tool_asset is defined and source.retrieveby == 'asset'
+
+        - name: "Download {{ _tool_asset }} asset"
+          get_url:
+            url: "{{ _tool_asset }}"
+            dest: "{{ _tool_temp_root.path }}"
+          when: _tool_asset is defined and source.retrieveby == 'asset-raw'
+      when: source.retrieveby is match('^asset.*') and tool.version.latest_assets|length > 0
+  when: source.type == 'github'
+
+- name: "Download {{ source.name }} file"
+  get_url:
+    url: "{{ source.url }}"
+    dest: "{{ _tool_temp_root.path }}"
+  when: source.type == 'download'
