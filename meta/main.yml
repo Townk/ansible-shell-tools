@@ -1,5 +1,5 @@
 galaxy_info:
-  role_name: ripgrep
+  role_name: shell-tools
   author: Thiago Alves
   description: Installs and configure RipGrep
 
