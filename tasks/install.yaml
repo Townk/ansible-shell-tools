@@ -72,6 +72,13 @@
 
 - name: "Install {{ tool.name }}"
   block:
+    - name: "Create {{ tool.name }} support directories"
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ lookup('env', 'TMPDIR') }}/ansible"
+
     ########################################################################
     # Get installed version
     - name: "Get installed {{ tool.name }} info"
@@ -126,7 +133,8 @@
         - name: "Create temp location for {{ tool.name }} install files"
           tempfile:
             state: directory
-            prefix: "ansible/{{ tool.name }}-install-"
+            path: "{{ lookup('env', 'TMPDIR') }}/ansible"
+            prefix: "{{ tool.name }}-install-"
           register: _tool_temp_root
 
         - name: "Create {{ tool.name }} installation tree"
